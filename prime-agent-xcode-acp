@@ -1,0 +1,188 @@
+#!/usr/bin/python3
+"""Bridge prime-agent into Xcode's ACP client.
+
+Xcode (26/27) sends the ACP `initialize` handshake with
+`protocolVersion` as a *string* (e.g. "1.0.0"), while prime-agent's ACP
+server expects an integer.  The mismatch makes Xcode report
+"JSON-RPC request with ID ... failed to produce a response".
+
+This wrapper normalizes the version to an integer on the way in, adds the
+v2 `authMethods` field that Xcode 27 requires on the initialize result
+(prime-agent's v1-shaped result omits it, and Xcode fails decoding with
+"The data couldn't be read because it is missing."), and relays everything
+else verbatim between Xcode and `prime-agent --mode acp`.
+"""
+import json
+import os
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+PRIME_AGENT = os.environ.get(
+    "PRIME_AGENT_BIN",
+    os.path.expanduser("~/.local/share/prime-agent/prime-agent"),
+)
+
+LOG_PATH = os.environ.get("PRIME_AGENT_XCODE_ACP_LOG", "/tmp/prime-agent-xcode-acp.log")
+_log = open(LOG_PATH, "a", buffering=1)
+
+
+def log(direction: str, line: str) -> None:
+    try:
+        _log.write(f"{time.strftime('%H:%M:%S')} {direction} {line.rstrip()}\n")
+    except Exception:
+        pass
+
+
+def python_cell_title(code: str, limit: int = 60) -> str:
+    """A readable tool-card title for a prime-agent Python REPL cell.
+
+    Xcode renders prime-agent's execute-kind tool calls as a "Terminal
+    Command" card whose subtitle is the ACP `title`.  prime-agent names
+    every Python cell "Python cell"; substitute the first line of the
+    actual code so the card says what the agent is doing.
+    """
+    first = next((ln.strip() for ln in code.splitlines() if ln.strip()), "")
+    if not first:
+        return "Run Python code"
+    if len(first) > limit:
+        first = first[: limit - 1] + "…"
+    return first
+
+
+def normalize(req_bytes: str) -> str:
+    """Xcode -> prime-agent direction."""
+    try:
+        msg = json.loads(req_bytes)
+    except Exception:
+        return req_bytes
+    if not isinstance(msg, dict):
+        return req_bytes
+    if msg.get("method") == "initialize" and isinstance(msg.get("params"), dict):
+        params = msg["params"]
+        pv = params.get("protocolVersion")
+        if isinstance(pv, str):
+            # Xcode sends "1.0.0"; prime-agent wants an integer.
+            try:
+                params["protocolVersion"] = int(pv.split(".")[0])
+            except Exception:
+                params["protocolVersion"] = 1
+            msg["params"] = params
+            return json.dumps(msg) + "\n"
+    return req_bytes
+
+
+def denormalize(resp_bytes: str, initialize_ids: set) -> str:
+    """prime-agent -> Xcode direction."""
+    try:
+        msg = json.loads(resp_bytes)
+    except Exception:
+        return resp_bytes
+    if not isinstance(msg, dict):
+        return resp_bytes
+    rid = msg.get("id")
+    if rid in initialize_ids and isinstance(msg.get("result"), dict):
+        result = msg["result"]
+        if "authMethods" not in result:
+            # Xcode 27 requires authMethods on the initialize result; prime-agent
+            # serves no auth, so advertise an empty list (spec: no auth/login).
+            result["authMethods"] = []
+            msg["result"] = result
+            initialize_ids.discard(rid)
+            return json.dumps(msg) + "\n"
+    if msg.get("method") == "session/update":
+        update = msg.get("params", {}).get("update", {})
+        if update.get("sessionUpdate") == "tool_call" and update.get("title") == "Python cell":
+            raw = update.get("rawInput")
+            code = raw.get("code") if isinstance(raw, dict) else None
+            if isinstance(code, str):
+                update["title"] = python_cell_title(code)
+                msg["params"]["update"] = update
+                return json.dumps(msg) + "\n"
+    return resp_bytes
+
+
+def main() -> int:
+    child = subprocess.Popen(
+        [PRIME_AGENT, "--mode", "acp"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=sys.stderr,
+        text=True,
+    )
+    assert child.stdin is not None and child.stdout is not None
+
+    initialize_ids = set()
+
+    sel = selectors.DefaultSelector()
+    sel.register(sys.stdin, selectors.EVENT_READ)          # Xcode -> child
+    sel.register(child.stdout, selectors.EVENT_READ)       # child -> Xcode
+
+    hide_thoughts = os.environ.get("PRIME_AGENT_XCODE_ACP_HIDE_THOUGHTS") == "1"
+
+    def forward_child_out():
+        data = child.stdout.readline()
+        if not data:
+            sel.unregister(child.stdout)
+        if hide_thoughts:
+            try:
+                msg = json.loads(data)
+                update = msg.get("params", {}).get("update", {})
+                if msg.get("method") == "session/update" and update.get("sessionUpdate") == "agent_thought_chunk":
+                    return  # drop the model's reasoning stream from Xcode's chat
+            except Exception:
+                pass
+        log("OUT", data)
+        sys.stdout.write(denormalize(data, initialize_ids))
+        sys.stdout.flush()
+
+    def forward_stdin():
+        line = sys.stdin.readline()
+        if not line:
+            sel.unregister(sys.stdin)
+            child.stdin.close()
+            return
+        try:
+            msg = json.loads(line)
+            if msg.get("method") == "initialize" and "id" in msg:
+                initialize_ids.add(msg.get("id"))
+        except Exception:
+            pass
+        log("IN", line)
+        child.stdin.write(normalize(line))
+        child.stdin.flush()
+
+    def stop(_sig, _frame):
+        try:
+            child.terminate()
+        except Exception:
+            pass
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    try:
+        while True:
+            if not sel.get_map():
+                break
+            for key, _ in sel.select():
+                if key.fileobj is sys.stdin:
+                    forward_stdin()
+                else:
+                    forward_child_out()
+    finally:
+        try:
+            child.stdin.close()
+        except Exception:
+            pass
+        try:
+            child.wait(timeout=5)
+        except Exception:
+            child.kill()
+    return child.returncode or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

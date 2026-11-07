@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Bridge logs (kept local by default)
+*.log
+
+# Local agent install symlinks
+.local/
