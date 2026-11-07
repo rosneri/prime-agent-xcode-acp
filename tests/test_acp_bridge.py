@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -46,6 +47,80 @@ def test_tool_title_rewrite():
           len(bridge_mod.python_cell_title("#" * 3000)) <= 2001)
     check("python_cell_title fallback",
           bridge_mod.python_cell_title("   \n\n") == "Run Python code")
+
+
+def test_skill_autoload():
+    bridge_mod = load_bridge()
+    skill_file = os.path.join(REPO_ROOT, "skills", "xcode-windows", "SKILL.md")
+    with open(skill_file, encoding="utf-8") as f:
+        bundled = f.read()
+
+    check("bundled skill is embedded for single-file installs",
+          bridge_mod.SKILL_MD.strip() == bundled.strip())
+    check("skill frontmatter matches its directory name",
+          bundled.startswith("---\nname: xcode-windows\n"))
+
+    saved = {name: os.environ.pop(name, None)
+             for name in (bridge_mod.SKILL_PATH_ENV, bridge_mod.NO_SKILL_ENV)}
+    try:
+        default_cmd = bridge_mod.child_command()
+        check("--skill is passed by default",
+              default_cmd[-2] == "--skill" and
+              default_cmd[-1].endswith(os.path.join("skills", "xcode-windows", "SKILL.md")),
+              detail=repr(default_cmd))
+        check("default skill path exists", os.path.isfile(default_cmd[-1]),
+              detail=default_cmd[-1])
+
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(bundled)
+            override = fh.name
+        try:
+            os.environ[bridge_mod.SKILL_PATH_ENV] = override
+            override_cmd = bridge_mod.child_command()
+            check("PRIME_AGENT_XCODE_ACP_SKILL overrides the path",
+                  override_cmd[-2:] == ["--skill", override],
+                  detail=repr(override_cmd))
+        finally:
+            os.environ.pop(bridge_mod.SKILL_PATH_ENV, None)
+            os.remove(override)
+
+        os.environ[bridge_mod.NO_SKILL_ENV] = "1"
+        check("PRIME_AGENT_XCODE_ACP_NO_SKILL removes --skill",
+              "--skill" not in bridge_mod.child_command())
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_skill_materialized_for_single_file_install():
+    bridge_mod = load_bridge()
+    saved_env = {name: os.environ.pop(name, None)
+                 for name in (bridge_mod.SKILL_PATH_ENV, bridge_mod.NO_SKILL_ENV)}
+    saved_repo, saved_install = bridge_mod.REPO_SKILL, bridge_mod.INSTALL_SKILL
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge_mod.REPO_SKILL = os.path.join(tmp, "missing", "SKILL.md")
+            bridge_mod.INSTALL_SKILL = os.path.join(
+                tmp, "install", "skills", "xcode-windows", "SKILL.md")
+            path = bridge_mod.resolve_skill_path()
+            written = ""
+            if path and os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    written = f.read()
+            check("bundled skill is written when no copy is installed",
+                  path == bridge_mod.INSTALL_SKILL and
+                  written.strip() == bridge_mod.SKILL_MD.strip())
+    finally:
+        bridge_mod.REPO_SKILL, bridge_mod.INSTALL_SKILL = saved_repo, saved_install
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def integration():
@@ -136,6 +211,8 @@ def integration():
 
 if __name__ == "__main__":
     test_tool_title_rewrite()
+    test_skill_autoload()
+    test_skill_materialized_for_single_file_install()
     integration()
     if failures:
         print("\nFAILED:", ", ".join(failures))
