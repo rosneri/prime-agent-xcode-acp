@@ -11,7 +11,7 @@ Xcode 27 speaks ACP v2: it sends `protocolVersion` as a *string* and requires `a
   - `protocolVersion: "1.0.0"` (string) → integer on the way in.
   - `authMethods: []` injected into the `initialize` result (Xcode 27's decoder demands the key).
 - **Relays everything else verbatim** — sessions, prompts, streaming updates, MCP traffic.
-- **Readable tool cards** — Python REPL tool calls are labeled with the first line of the code instead of the generic `Python cell`.
+- **Readable tool cards** — Python REPL tool calls show the full code of the cell instead of the generic `Python cell`.
 - **Quiet mode** — optionally drop the model's reasoning stream from the chat.
 - **Traffic log** — every ACP message is written to a file for debugging, no guessing.
 
@@ -81,7 +81,7 @@ git clone https://github.com/rosneri/prime-agent-xcode-acp.git
 | --- | --- |
 | `JSON-RPC request with ID ... failed to produce a response` | The Executable field contains the whole command line (`.../prime-agent --mode acp`). Put only the bridge path in Executable, leave Arguments empty. |
 | `The data couldn't be read because it is missing.` | Xcode 27 requires `authMethods` on the `initialize` result; the current bridge injects it. Make sure Xcode is launching the bridge (not the raw prime-agent binary). |
-| Tool cards say `Python cell` | Old bridge version. Current versions label each card with the first line of the cell's code. |
+| Tool cards say `Python cell` (or show only one line) | Old bridge version. Current versions label each card with the cell's full code. |
 | The agent still fails | Read `/tmp/prime-agent-xcode-acp.log` — it shows exactly what Xcode sent and what prime-agent answered. Restart Xcode after changing the agent config. |
 
 ## Development

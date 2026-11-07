@@ -36,20 +36,20 @@ def log(direction: str, line: str) -> None:
         pass
 
 
-def python_cell_title(code: str, limit: int = 60) -> str:
+def python_cell_title(code: str, limit: int = 2000) -> str:
     """A readable tool-card title for a prime-agent Python REPL cell.
 
     Xcode renders prime-agent's execute-kind tool calls as a "Terminal
     Command" card whose subtitle is the ACP `title`.  prime-agent names
-    every Python cell "Python cell"; substitute the first line of the
-    actual code so the card says what the agent is doing.
+    every Python cell "Python cell"; substitute the cell's code so the
+    card shows the whole script Xcode ran.
     """
-    first = next((ln.strip() for ln in code.splitlines() if ln.strip()), "")
-    if not first:
+    code = code.strip()
+    if not code:
         return "Run Python code"
-    if len(first) > limit:
-        first = first[: limit - 1] + "…"
-    return first
+    if len(code) > limit:
+        code = code[: limit - 2].rstrip() + "\n…"
+    return code
 
 
 def normalize(req_bytes: str) -> str:

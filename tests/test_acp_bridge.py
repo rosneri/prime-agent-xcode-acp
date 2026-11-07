@@ -39,11 +39,11 @@ def load_bridge():
 
 def test_tool_title_rewrite():
     bridge_mod = load_bridge()
-    check("python_cell_title uses first line",
-          bridge_mod.python_cell_title("import os\nprint('x')") == "import os")
-    check("python_cell_title truncates",
-          bridge_mod.python_cell_title("#" + "x" * 200).startswith("#") and
-          len(bridge_mod.python_cell_title("#" + "x" * 200)) <= 60)
+    check("python_cell_title returns the full code",
+          bridge_mod.python_cell_title("import os\nprint('x')") == "import os\nprint('x')")
+    check("python_cell_title caps very long cells",
+          bridge_mod.python_cell_title("#" * 3000).endswith("…") and
+          len(bridge_mod.python_cell_title("#" * 3000)) <= 2001)
     check("python_cell_title fallback",
           bridge_mod.python_cell_title("   \n\n") == "Run Python code")
 
@@ -99,16 +99,21 @@ def integration():
         send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
               "params": {"sessionId": sid,
                          "prompt": [{"type": "text", "text": "Reply with exactly: done"}]}})
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            time.sleep(1)
+        def turn_finished():
             for _, line in lines:
-                if '"end_turn"' in line:
-                    break
-            if any('"stopReason": "end_turn"' in line for _, line in lines):
-                break
-        check("session/prompt streams a turn to end_turn",
-              any('"stopReason": "end_turn"' in line for _, line in lines))
+                try:
+                    obj = json.loads(line)
+                    if obj.get("id") == 3 and isinstance(obj.get("result"), dict) \
+                            and obj["result"].get("stopReason") == "end_turn":
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        deadline = time.time() + 180  # model + daemon can be slow under load
+        while time.time() < deadline and not turn_finished():
+            time.sleep(1)
+        check("session/prompt streams a turn to end_turn", turn_finished())
         titles = []
         for _, line in lines:
             try:
